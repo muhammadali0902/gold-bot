@@ -301,7 +301,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
         for job in ctx.job_queue.get_jobs_by_name(f"auto_{chat_id}"):
             job.schedule_removal()
-        ctx.job_queue.run_repeating(auto_signal_job, interval=1800, first=10,
+        ctx.job_queue.run_repeating(auto_signal_job, interval=900, first=10,
                                     data=chat_id, name=f"auto_{chat_id}")
         await q.message.reply_text("✅ Har 30 daqiqada signal olasiz!\nBekor qilish: /unsubscribe")
 
@@ -313,7 +313,7 @@ async def cmd_subscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     for job in ctx.job_queue.get_jobs_by_name(f"auto_{chat_id}"):
         job.schedule_removal()
-    ctx.job_queue.run_repeating(auto_signal_job, interval=1800, first=10,
+    ctx.job_queue.run_repeating(auto_signal_job, interval=900, first=10,
                                 data=chat_id, name=f"auto_{chat_id}")
     await update.message.reply_text("✅ Obuna bo'ldingiz!\nBekor qilish: /unsubscribe")
 
