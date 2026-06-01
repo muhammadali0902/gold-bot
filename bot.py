@@ -2,20 +2,82 @@
 import logging
 import asyncio
 import aiohttp
-from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import json
+import os
+from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters
+    CallbackQueryHandler, ContextTypes, filters,
+    PreCheckoutQueryHandler
 )
 
 BOT_TOKEN = "8620122819:AAGwp7yCX5s816zZs17kM8rpDhGWpxAexX4"
-ALPHA_VANTAGE_KEY = "SEEPKRCHUFNR075N"
+TWELVE_DATA_KEY = "b7e3d63b149644698d40763661942f9d"
 CHANNEL = "@gold_signaluz"
+FREE_SIGNALS = 3
+PREMIUM_STARS = 500  # 500 Stars = ~$10
+DATA_FILE = "users.json"
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ── USER DATA ──────────────────────────────────────────────────────────────────
+def load_users():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_users(users):
+    with open(DATA_FILE, "w") as f:
+        json.dump(users, f)
+
+def get_user(user_id: int):
+    users = load_users()
+    uid = str(user_id)
+    if uid not in users:
+        users[uid] = {"signals_used": 0, "premium": False, "premium_until": None}
+        save_users(users)
+    return users[uid]
+
+def update_user(user_id: int, data: dict):
+    users = load_users()
+    uid = str(user_id)
+    if uid not in users:
+        users[uid] = {"signals_used": 0, "premium": False, "premium_until": None}
+    users[uid].update(data)
+    save_users(users)
+
+def is_premium(user_id: int) -> bool:
+    user = get_user(user_id)
+    if not user["premium"]:
+        return False
+    if user["premium_until"]:
+        until = datetime.fromisoformat(user["premium_until"])
+        if datetime.now() > until:
+            update_user(user_id, {"premium": False, "premium_until": None})
+            return False
+    return True
+
+def can_use_signal(user_id: int) -> bool:
+    if is_premium(user_id):
+        return True
+    user = get_user(user_id)
+    return user["signals_used"] < FREE_SIGNALS
+
+def use_signal(user_id: int):
+    if not is_premium(user_id):
+        user = get_user(user_id)
+        update_user(user_id, {"signals_used": user["signals_used"] + 1})
+
+def signals_left(user_id: int) -> int:
+    if is_premium(user_id):
+        return 999
+    user = get_user(user_id)
+    return max(0, FREE_SIGNALS - user["signals_used"])
+
+# ── API ────────────────────────────────────────────────────────────────────────
 async def check_subscription(user_id: int, bot) -> bool:
     try:
         member = await bot.get_chat_member(CHANNEL, user_id)
@@ -24,39 +86,39 @@ async def check_subscription(user_id: int, bot) -> bool:
         return False
 
 async def get_gold_price():
-    url = (f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE"
-           f"&from_currency=XAU&to_currency=USD&apikey={ALPHA_VANTAGE_KEY}")
+    url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={TWELVE_DATA_KEY}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
                 data = await r.json()
-                rate = data.get("Realtime Currency Exchange Rate", {})
-                if rate:
+                if "price" in data:
+                    price = float(data["price"])
                     return {
-                        "price": float(rate["5. Exchange Rate"]),
-                        "bid": float(rate.get("8. Bid Price", rate["5. Exchange Rate"])),
-                        "ask": float(rate.get("9. Ask Price", rate["5. Exchange Rate"])),
-                        "time": rate.get("6. Last Refreshed", "N/A"),
+                        "price": price,
+                        "bid": price - 0.15,
+                        "ask": price + 0.15,
+                        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     }
     except Exception as e:
         logger.error(f"Narx olishda xato: {e}")
     return None
 
 async def get_intraday_data():
-    url = (f"https://www.alphavantage.co/query?function=FX_INTRADAY"
-           f"&from_symbol=XAU&to_symbol=USD&interval=5min&outputsize=compact"
-           f"&apikey={ALPHA_VANTAGE_KEY}")
+    url = (f"https://api.twelvedata.com/time_series"
+           f"?symbol=XAU/USD&interval=5min&outputsize=20"
+           f"&apikey={TWELVE_DATA_KEY}")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
                 data = await r.json()
-                series = data.get("Time Series FX (5min)", {})
-                closes = [float(v["4. close"]) for v in list(series.values())[:20]]
+                values = data.get("values", [])
+                closes = [float(v["close"]) for v in values]
                 return closes
     except Exception as e:
         logger.error(f"Intraday data xato: {e}")
     return []
 
+# ── TAHLIL ─────────────────────────────────────────────────────────────────────
 def calc_ema(prices, period):
     if len(prices) < period:
         return sum(prices) / len(prices)
@@ -83,7 +145,6 @@ def analyze_signal(prices, current):
                 "ema9": current, "ema21": current, "rsi": 50, "trend": "—",
                 "sl": current - 5, "tp1": current + 5, "tp2": current + 10,
                 "high5": current, "low5": current}
-
     ema9 = calc_ema(prices, min(9, len(prices)))
     ema21 = calc_ema(prices, min(21, len(prices)))
     rsi = calc_rsi(prices)
@@ -93,7 +154,6 @@ def analyze_signal(prices, current):
     spread = high5 - low5
     trend = "UP" if prices[0] > prices[4] else "DOWN"
     score = 0
-
     if ema9 > ema21: score += 2
     else: score -= 2
     if rsi < 35: score += 2
@@ -104,41 +164,40 @@ def analyze_signal(prices, current):
     else: score -= 1
     if current > ema9: score += 1
     else: score -= 1
-
     atr = spread / 5 if spread > 0 else 2
-
     if spread > 8:
         signal, conf, reason = "⚠️ WAIT", 40, "Bozor juda o'zgaruvchan"
     elif score >= 4:
-        signal, conf, reason = "🟢 BUY", min(95, 60 + score * 5), f"EMA cross + RSI {rsi} + Trend yuqoriga"
+        signal, conf, reason = "🟢 BUY", min(95, 60 + score * 5), f"EMA + RSI {rsi} + Trend yuqoriga"
     elif score <= -4:
-        signal, conf, reason = "🔴 SELL", min(95, 60 + abs(score) * 5), f"EMA cross + RSI {rsi} + Trend pastga"
+        signal, conf, reason = "🔴 SELL", min(95, 60 + abs(score) * 5), f"EMA + RSI {rsi} + Trend pastga"
     elif score > 0:
         signal, conf, reason = "🟡 WEAK BUY", 45, f"Kuchsiz ko'tarilish, RSI {rsi}"
     elif score < 0:
         signal, conf, reason = "🟠 WEAK SELL", 45, f"Kuchsiz tushish, RSI {rsi}"
     else:
         signal, conf, reason = "⏳ WAIT", 50, "Aniq signal yo'q"
-
     sl = round(low5 - atr * 1.5, 2) if "BUY" in signal else round(high5 + atr * 1.5, 2)
     tp1 = round(current + atr * 2, 2) if "BUY" in signal else round(current - atr * 2, 2)
     tp2 = round(current + atr * 4, 2) if "BUY" in signal else round(current - atr * 4, 2)
-
     return {"signal": signal, "confidence": conf, "reason": reason,
             "ema9": round(ema9, 2), "ema21": round(ema21, 2), "rsi": rsi,
             "trend": trend, "sl": sl, "tp1": tp1, "tp2": tp2,
             "high5": round(high5, 2), "low5": round(low5, 2)}
 
-def format_signal_message(price_data, analysis):
+def format_signal_message(price_data, analysis, user_id):
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     bars = "█" * (analysis["confidence"] // 10) + "░" * (10 - analysis["confidence"] // 10)
     trend_arrow = "📈" if analysis["trend"] == "UP" else "📉"
+    left = signals_left(user_id)
+    plan = "👑 PREMIUM" if is_premium(user_id) else f"🆓 Bepul ({left} ta qoldi)"
     return (
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🥇 *XAUUSD (OLTIN) SIGNAL*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
         f"💰 *Narx:* `{price_data['price']:.2f}` USD\n"
-        f"🕐 *Vaqt:* {now}\n\n"
+        f"🕐 *Vaqt:* {now}\n"
+        f"📋 *Reja:* {plan}\n\n"
         f"┌─────────────────────\n"
         f"│ {analysis['signal']}\n"
         f"│ Ishonch: {bars} {analysis['confidence']}%\n"
@@ -156,43 +215,64 @@ def format_signal_message(price_data, analysis):
         f"⚠️ _Risk managementni unutmang!_"
     )
 
+# ── BUYRUQLAR ──────────────────────────────────────────────────────────────────
 async def not_subscribed_msg(update):
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 Kanalga obuna bo'lish", url=f"https://t.me/gold_signaluz")],
+        [InlineKeyboardButton("📢 Kanalga obuna bo'lish", url="https://t.me/gold_signaluz")],
         [InlineKeyboardButton("✅ Obuna bo'ldim", callback_data="check_sub")],
     ])
     await update.message.reply_text(
         "⚠️ *Botdan foydalanish uchun kanalga obuna bo'ling!*\n\n"
-        f"📢 Kanal: {CHANNEL}\n\n"
-        "Obuna bo'lgach — ✅ tugmasini bosing!",
-        parse_mode="Markdown",
-        reply_markup=kb
-    )
+        f"📢 Kanal: {CHANNEL}",
+        parse_mode="Markdown", reply_markup=kb)
+
+async def premium_required_msg(message, user_id):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("👑 Premium olish (500 ⭐)", callback_data="buy_premium")],
+    ])
+    await message.reply_text(
+        "⚠️ *Bepul signallar tugadi!*\n\n"
+        f"Siz {FREE_SIGNALS} ta bepul signal ishlatdingiz.\n\n"
+        "👑 *Premium — 500 Telegram Stars (~$10/oy)*\n"
+        "✅ Cheksiz signal\n"
+        "✅ Har 15 daqiqada avtomatik signal\n"
+        "✅ SL/TP aniq ko'rsatiladi\n\n"
+        "Premium olish uchun tugmani bosing! 👇",
+        parse_mode="Markdown", reply_markup=kb)
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    name = update.effective_user.first_name
     if not await check_subscription(user_id, ctx.bot):
         await not_subscribed_msg(update)
         return
+    get_user(user_id)
+    left = signals_left(user_id)
+    plan = "👑 PREMIUM" if is_premium(user_id) else f"🆓 Bepul ({left} ta signal qoldi)"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Signal olish", callback_data="signal")],
         [InlineKeyboardButton("💰 Joriy narx", callback_data="price")],
-        [InlineKeyboardButton("🔔 Obuna bo'lish", callback_data="subscribe")],
+        [InlineKeyboardButton("👑 Premium olish", callback_data="buy_premium")],
+        [InlineKeyboardButton("📋 Mening rejam", callback_data="my_plan")],
     ])
     await update.message.reply_text(
-        "🥇 *XAUUSD Trading Signal Bot*\n\n"
-        "Salom! Men oltin bozori uchun signal beraman.\n\n"
-        "• /signal — signal olish\n"
-        "• /price — joriy narx\n"
-        "• /subscribe — avtomatik signal\n"
-        "• Narx yuboring: `4545` — tahlil qilaman",
-        parse_mode="Markdown", reply_markup=kb,
-    )
+        f"🥇 *XAUUSD Trading Signal Bot*\n\n"
+        f"Salom, {name}! 👋\n\n"
+        f"📋 Sizning rejangiz: *{plan}*\n\n"
+        f"• /signal — signal olish\n"
+        f"• /price — joriy narx\n"
+        f"• /premium — premium olish\n"
+        f"• Narx yuboring: `4545` — tahlil",
+        parse_mode="Markdown", reply_markup=kb)
 
 async def cmd_signal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not await check_subscription(user_id, ctx.bot):
         await not_subscribed_msg(update)
+        return
+    if not can_use_signal(user_id):
+        msg = update.message or update.callback_query.message
+        await premium_required_msg(msg, user_id)
         return
     msg = update.message or update.callback_query.message
     wait = await msg.reply_text("⏳ Tahlil qilinmoqda...")
@@ -200,16 +280,19 @@ async def cmd_signal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         price_data = await get_gold_price()
         prices = await get_intraday_data()
         if not price_data:
-            await wait.edit_text("❌ API dan narx olib bo'lmadi. Keyinroq urinib ko'ring.")
+            await wait.edit_text("❌ Narx olib bo'lmadi. Keyinroq urinib ko'ring.")
             return
         if not prices:
             prices = [price_data["price"]] * 14
         analysis = analyze_signal(prices, price_data["price"])
-        text = format_signal_message(price_data, analysis)
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Yangilash", callback_data="signal"),
-             InlineKeyboardButton("💰 Narx", callback_data="price")],
-        ])
+        use_signal(user_id)
+        text = format_signal_message(price_data, analysis, user_id)
+        left = signals_left(user_id)
+        kb_buttons = [[InlineKeyboardButton("🔄 Yangilash", callback_data="signal"),
+                       InlineKeyboardButton("💰 Narx", callback_data="price")]]
+        if not is_premium(user_id) and left == 0:
+            kb_buttons.append([InlineKeyboardButton("👑 Premium olish", callback_data="buy_premium")])
+        kb = InlineKeyboardMarkup(kb_buttons)
         await wait.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     except Exception as e:
         logger.error(f"Signal xato: {e}")
@@ -234,10 +317,35 @@ async def cmd_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Signal olish", callback_data="signal")]])
     await wait.edit_text(text, parse_mode="Markdown", reply_markup=kb)
 
+async def cmd_premium(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if is_premium(user_id):
+        user = get_user(user_id)
+        until = user.get("premium_until", "Noma'lum")
+        await update.message.reply_text(
+            f"👑 *Siz allaqachon Premium foydalanuvchisiz!*\n\n"
+            f"📅 Muddati: {until[:10] if until else 'Cheksiz'}",
+            parse_mode="Markdown")
+        return
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⭐ 500 Stars bilan to'lash", callback_data="buy_premium")],
+    ])
+    await update.message.reply_text(
+        "👑 *Premium Reja — 500 Telegram Stars (~$10/oy)*\n\n"
+        "✅ Cheksiz signal\n"
+        "✅ Har 15 daqiqada avtomatik signal\n"
+        "✅ SL/TP aniq ko'rsatiladi\n"
+        "✅ Kanal obunasi bilan birga\n\n"
+        "👇 Tugmani bosib to'lang:",
+        parse_mode="Markdown", reply_markup=kb)
+
 async def handle_manual_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not await check_subscription(user_id, ctx.bot):
         await not_subscribed_msg(update)
+        return
+    if not can_use_signal(user_id):
+        await premium_required_msg(update.message, user_id)
         return
     try:
         price = float(update.message.text.strip().replace(",", "."))
@@ -252,12 +360,14 @@ async def handle_manual_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         prices = [price] * 14
     analysis = analyze_signal(prices, price)
     price_data = {"price": price, "ask": price + 0.3, "bid": price - 0.3}
-    text = format_signal_message(price_data, analysis)
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Real narx bilan", callback_data="signal")]])
-    await wait.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+    use_signal(user_id)
+    text = format_signal_message(price_data, analysis, user_id)
+    await wait.edit_text(text, parse_mode="Markdown")
 
 async def auto_signal_job(ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = ctx.job.data
+    if not is_premium(chat_id):
+        return
     try:
         price_data = await get_gold_price()
         prices = await get_intraday_data()
@@ -266,7 +376,7 @@ async def auto_signal_job(ctx: ContextTypes.DEFAULT_TYPE):
         analysis = analyze_signal(prices, price_data["price"])
         if "WAIT" in analysis["signal"] or "WEAK" in analysis["signal"]:
             return
-        text = "🔔 *AVTOMATIK SIGNAL*\n\n" + format_signal_message(price_data, analysis)
+        text = "🔔 *AVTOMATIK SIGNAL*\n\n" + format_signal_message(price_data, analysis, chat_id)
         await ctx.bot.send_message(chat_id, text, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Auto signal xato: {e}")
@@ -278,15 +388,26 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if q.data == "check_sub":
         if await check_subscription(user_id, ctx.bot):
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📊 Signal olish", callback_data="signal")],
-                [InlineKeyboardButton("💰 Joriy narx", callback_data="price")],
-            ])
-            await q.message.reply_text(
-                "✅ *Rahmat! Obuna tasdiqlandi!*\n\nEndi botdan foydalanishingiz mumkin!",
-                parse_mode="Markdown", reply_markup=kb)
+            await q.message.reply_text("✅ Rahmat! Endi /start yuboring!", parse_mode="Markdown")
         else:
             await q.answer("❌ Hali obuna bo'lmadingiz!", show_alert=True)
+        return
+
+    if q.data == "my_plan":
+        left = signals_left(user_id)
+        plan = "👑 PREMIUM" if is_premium(user_id) else f"🆓 Bepul ({left} ta signal qoldi)"
+        await q.message.reply_text(f"📋 *Sizning rejangiz:* {plan}", parse_mode="Markdown")
+        return
+
+    if q.data == "buy_premium":
+        await ctx.bot.send_invoice(
+            chat_id=user_id,
+            title="👑 Gold Signal Premium",
+            description="1 oylik premium obuna — cheksiz signal, avtomatik signal har 15 daqiqada",
+            payload="premium_1month",
+            currency="XTR",
+            prices=[LabeledPrice("Premium 1 oy", PREMIUM_STARS)],
+        )
         return
 
     if not await check_subscription(user_id, ctx.bot):
@@ -298,39 +419,64 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif q.data == "price":
         await cmd_price(update, ctx)
     elif q.data == "subscribe":
+        if not is_premium(user_id):
+            await q.message.reply_text("⚠️ Avtomatik signal faqat Premium foydalanuvchilar uchun!\n\n/premium buyrug'ini yuboring.")
+            return
         chat_id = update.effective_chat.id
         for job in ctx.job_queue.get_jobs_by_name(f"auto_{chat_id}"):
             job.schedule_removal()
         ctx.job_queue.run_repeating(auto_signal_job, interval=900, first=10,
                                     data=chat_id, name=f"auto_{chat_id}")
-        await q.message.reply_text("✅ Har 30 daqiqada signal olasiz!\nBekor qilish: /unsubscribe")
+        await q.message.reply_text("✅ Har 15 daqiqada signal olasiz!")
+
+async def precheckout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.pre_checkout_query.answer(ok=True)
+
+async def successful_payment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    until = (datetime.now() + timedelta(days=30)).isoformat()
+    update_user(user_id, {"premium": True, "premium_until": until})
+    chat_id = update.effective_chat.id
+    for job in ctx.job_queue.get_jobs_by_name(f"auto_{chat_id}"):
+        job.schedule_removal()
+    ctx.job_queue.run_repeating(auto_signal_job, interval=900, first=10,
+                                data=chat_id, name=f"auto_{chat_id}")
+    await update.message.reply_text(
+        "🎉 *To'lov qabul qilindi! Premium faollashdi!*\n\n"
+        "👑 Endi cheksiz signal olasiz!\n"
+        "🔔 Avtomatik signal har 15 daqiqada keladi!\n\n"
+        "Muddati: 30 kun",
+        parse_mode="Markdown")
 
 async def cmd_subscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not await check_subscription(user_id, ctx.bot):
-        await not_subscribed_msg(update)
+    if not is_premium(user_id):
+        await update.message.reply_text("⚠️ Avtomatik signal faqat Premium uchun!\n\n/premium yuboring.")
         return
     chat_id = update.effective_chat.id
     for job in ctx.job_queue.get_jobs_by_name(f"auto_{chat_id}"):
         job.schedule_removal()
     ctx.job_queue.run_repeating(auto_signal_job, interval=900, first=10,
                                 data=chat_id, name=f"auto_{chat_id}")
-    await update.message.reply_text("✅ Obuna bo'ldingiz!\nBekor qilish: /unsubscribe")
+    await update.message.reply_text("✅ Har 15 daqiqada avtomatik signal keladi!")
 
 async def cmd_unsubscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     for job in ctx.job_queue.get_jobs_by_name(f"auto_{chat_id}"):
         job.schedule_removal()
-    await update.message.reply_text("❌ Obuna bekor qilindi.")
+    await update.message.reply_text("❌ Avtomatik signal o'chirildi.")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("signal", cmd_signal))
     app.add_handler(CommandHandler("price", cmd_price))
+    app.add_handler(CommandHandler("premium", cmd_premium))
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(PreCheckoutQueryHandler(precheckout))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_manual_price))
     logger.info("Bot ishga tushdi ✅")
     app.run_polling(drop_pending_updates=True)
