@@ -15,6 +15,7 @@ from telegram.ext import (
 BOT_TOKEN = "8620122819:AAGwp7yCX5s816zZs17kM8rpDhGWpxAexX4"
 TWELVE_DATA_KEY = "b7e3d63b149644698d40763661942f9d"
 CHANNEL = "@gold_signaluz"
+ADMIN_IDS = [5398690867]  # Bot egasi — bepul premium
 FREE_SIGNALS = 3
 PREMIUM_STARS = 500  # 500 Stars = ~$10
 DATA_FILE = "users.json"
@@ -50,6 +51,8 @@ def update_user(user_id: int, data: dict):
     save_users(users)
 
 def is_premium(user_id: int) -> bool:
+    if user_id in ADMIN_IDS:
+        return True  # Admin har doim premium
     user = get_user(user_id)
     if not user["premium"]:
         return False
@@ -61,6 +64,8 @@ def is_premium(user_id: int) -> bool:
     return True
 
 def can_use_signal(user_id: int) -> bool:
+    if user_id in ADMIN_IDS:
+        return True  # Admin cheksiz signal
     if is_premium(user_id):
         return True
     user = get_user(user_id)
