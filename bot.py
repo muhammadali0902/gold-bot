@@ -568,44 +568,28 @@ async def cmd_session(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     overlap = london_open and ny_open
 
     text = (
-        f"🌍 *FOREX SESSIYALARI*
-"
-        f"🕐 Hozir: *{now.strftime('%H:%M')}* (Toshkent)
-"
-        f"━━━━━━━━━━━━━━━━━━━━
-
-"
+        f"🌍 *FOREX SESSIYALARI*\n"
+        f"🕐 Hozir: *{now.strftime('%H:%M')}* (Toshkent)\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
     )
     for line in lines:
-        text += f"• {line}
-"
+        text += f"• {line}\n"
 
-    text += "
-"
+    text += "\n"
     if overlap:
-        text += "⚡ *London + NY overlap — ENG FAOL VAQT!* 🔥
-"
-        text += "💡 Hozir signal kuchi yuqori!
-"
+        text += "⚡ *London + NY overlap — ENG FAOL VAQT!* 🔥\n"
+        text += "💡 Hozir signal kuchi yuqori!\n"
     elif active:
-        text += f"✅ *Faol sessiya:* {', '.join(active)}
-"
+        text += f"✅ *Faol sessiya:* {', '.join(active)}\n"
     else:
-        text += "😴 *Hozir faol sessiya yo'q*
-"
-        text += "💡 London sessiyasi: 13:00 dan
-"
+        text += "😴 *Hozir faol sessiya yo'q*\n"
+        text += "💡 London sessiyasi: 13:00 dan\n"
 
     text += (
-        f"
-━━━━━━━━━━━━━━━━━━━━
-"
-        f"🥇 *XAUUSD uchun eng yaxshi vaqt:*
-"
-        f"• London: 13:00 — 22:00
-"
-        f"• London+NY: 18:00 — 22:00 🔥
-"
+        f"\n━━━━━━━━━━━━━━━━━━━━\n"
+        f"🥇 *XAUUSD uchun eng yaxshi vaqt:*\n"
+        f"• London: 13:00 — 22:00\n"
+        f"• London+NY: 18:00 — 22:00 🔥\n"
     )
 
     kb = InlineKeyboardMarkup([
