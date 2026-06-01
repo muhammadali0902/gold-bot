@@ -260,6 +260,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("💰 Joriy narx", callback_data="price")],
         [InlineKeyboardButton("👑 Premium olish", callback_data="buy_premium")],
         [InlineKeyboardButton("📋 Mening rejam", callback_data="my_plan")],
+        [InlineKeyboardButton("🌍 Sessiyalar", callback_data="session")],
     ])
     await update.message.reply_text(
         f"🥇 *XAUUSD Trading Signal Bot*\n\n"
@@ -420,6 +421,9 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer("❌ Avval kanalga obuna bo'ling!", show_alert=True)
         return
 
+    if q.data == "session":
+        await cmd_session(update, ctx)
+        return
     if q.data == "signal":
         await cmd_signal(update, ctx)
     elif q.data == "price":
@@ -472,9 +476,87 @@ async def cmd_unsubscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         job.schedule_removal()
     await update.message.reply_text("❌ Avtomatik signal o'chirildi.")
 
+
+async def cmd_session(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Forex sessiyalari holati"""
+    tz = zoneinfo.ZoneInfo("Asia/Tashkent")
+    now = datetime.now(tz)
+    hour = now.hour + now.minute / 60
+
+    sessions = {
+        "🇦🇺 Sidney":   (2, 11),
+        "🇯🇵 Tokio":    (4, 13),
+        "🇬🇧 London":   (13, 22),
+        "🇺🇸 Nyu-York": (18, 27),  # 27 = 03:00 ertasi
+    }
+
+    lines = []
+    active = []
+    for name, (start, end) in sessions.items():
+        h = hour if hour >= start else hour + 24
+        is_open = start <= h < end
+        status = "🟢 OCHIQ" if is_open else "🔴 YOPIQ"
+        end_real = end if end <= 24 else end - 24
+        lines.append(f"{name}: {status} ({start:02.0f}:00 — {end_real:02.0f}:00)")
+        if is_open:
+            active.append(name.split()[-1])
+
+    # Overlap tekshirish
+    london_open = 13 <= hour < 22
+    ny_open = 18 <= hour < 27
+    overlap = london_open and ny_open
+
+    text = (
+        f"🌍 *FOREX SESSIYALARI*
+"
+        f"🕐 Hozir: *{now.strftime('%H:%M')}* (Toshkent)
+"
+        f"━━━━━━━━━━━━━━━━━━━━
+
+"
+    )
+    for line in lines:
+        text += f"• {line}
+"
+
+    text += "
+"
+    if overlap:
+        text += "⚡ *London + NY overlap — ENG FAOL VAQT!* 🔥
+"
+        text += "💡 Hozir signal kuchi yuqori!
+"
+    elif active:
+        text += f"✅ *Faol sessiya:* {', '.join(active)}
+"
+    else:
+        text += "😴 *Hozir faol sessiya yo'q*
+"
+        text += "💡 London sessiyasi: 13:00 dan
+"
+
+    text += (
+        f"
+━━━━━━━━━━━━━━━━━━━━
+"
+        f"🥇 *XAUUSD uchun eng yaxshi vaqt:*
+"
+        f"• London: 13:00 — 22:00
+"
+        f"• London+NY: 18:00 — 22:00 🔥
+"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Signal olish", callback_data="signal")],
+        [InlineKeyboardButton("🔄 Yangilash", callback_data="session")],
+    ])
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("session", cmd_session))
     app.add_handler(CommandHandler("signal", cmd_signal))
     app.add_handler(CommandHandler("price", cmd_price))
     app.add_handler(CommandHandler("premium", cmd_premium))
