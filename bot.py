@@ -145,6 +145,37 @@ def calc_rsi(prices, period=14):
     al = sum(losses) / period if losses else 1e-9
     return round(100 - 100 / (1 + ag / al), 2)
 
+
+def calc_macd(prices, fast=12, slow=26, signal=9):
+    if len(prices) < slow:
+        return 0, 0, 0
+    ema_fast = calc_ema(prices, fast)
+    ema_slow = calc_ema(prices, slow)
+    macd_line = ema_fast - ema_slow
+    # Signal line (EMA of MACD)
+    macd_values = []
+    for i in range(len(prices) - slow + 1):
+        ef = calc_ema(prices[i:i+slow], fast)
+        es = calc_ema(prices[i:i+slow], slow)
+        macd_values.append(ef - es)
+    if len(macd_values) >= signal:
+        signal_line = calc_ema(macd_values, signal)
+    else:
+        signal_line = macd_line
+    histogram = macd_line - signal_line
+    return round(macd_line, 4), round(signal_line, 4), round(histogram, 4)
+
+def calc_bollinger(prices, period=20, std_dev=2):
+    if len(prices) < period:
+        return 0, 0, 0
+    recent = prices[:period]
+    middle = sum(recent) / period
+    variance = sum((p - middle) ** 2 for p in recent) / period
+    std = variance ** 0.5
+    upper = round(middle + std_dev * std, 2)
+    lower = round(middle - std_dev * std, 2)
+    return round(upper, 2), round(middle, 2), round(lower, 2)
+
 def analyze_signal(prices, current):
     if len(prices) < 14:
         return {"signal": "⏳ WAIT", "confidence": 0, "reason": "Ma'lumot yetarli emas",
@@ -183,13 +214,39 @@ def analyze_signal(prices, current):
         signal, conf, reason = "🟠 WEAK SELL", 45, f"Kuchsiz tushish, RSI {rsi}"
     else:
         signal, conf, reason = "⏳ WAIT", 50, "Aniq signal yo'q"
+    # MACD
+    macd_line, signal_line, histogram = calc_macd(prices)
+    if histogram > 0: score += 1
+    else: score -= 1
+
+    # Bollinger Bands
+    bb_upper, bb_middle, bb_lower = calc_bollinger(prices)
+    if current < bb_lower: score += 1   # Pastki banddan chiqdi — BUY
+    elif current > bb_upper: score -= 1  # Yuqori banddan chiqdi — SELL
+
+    # Qayta hisoblash score asosida
+    if spread > 8:
+        signal, conf, reason = "⚠️ WAIT", 40, "Bozor juda o'zgaruvchan"
+    elif score >= 5:
+        signal, conf, reason = "🟢 BUY", min(95, 60 + score * 4), f"EMA+MACD+RSI {rsi} — Kuchli signal"
+    elif score <= -5:
+        signal, conf, reason = "🔴 SELL", min(95, 60 + abs(score) * 4), f"EMA+MACD+RSI {rsi} — Kuchli signal"
+    elif score > 0:
+        signal, conf, reason = "🟡 WEAK BUY", 45, f"Kuchsiz ko'tarilish, RSI {rsi}"
+    elif score < 0:
+        signal, conf, reason = "🟠 WEAK SELL", 45, f"Kuchsiz tushish, RSI {rsi}"
+    else:
+        signal, conf, reason = "⏳ WAIT", 50, "Aniq signal yo'q"
+
     sl = round(low5 - atr * 1.5, 2) if "BUY" in signal else round(high5 + atr * 1.5, 2)
     tp1 = round(current + atr * 2, 2) if "BUY" in signal else round(current - atr * 2, 2)
     tp2 = round(current + atr * 4, 2) if "BUY" in signal else round(current - atr * 4, 2)
     return {"signal": signal, "confidence": conf, "reason": reason,
             "ema9": round(ema9, 2), "ema21": round(ema21, 2), "rsi": rsi,
             "trend": trend, "sl": sl, "tp1": tp1, "tp2": tp2,
-            "high5": round(high5, 2), "low5": round(low5, 2)}
+            "high5": round(high5, 2), "low5": round(low5, 2),
+            "macd": macd_line, "macd_signal": signal_line, "histogram": histogram,
+            "bb_upper": bb_upper, "bb_middle": bb_middle, "bb_lower": bb_lower}
 
 def format_signal_message(price_data, analysis, user_id):
     now = datetime.now(zoneinfo.ZoneInfo("Asia/Tashkent")).strftime("%d.%m.%Y %H:%M")
@@ -210,10 +267,14 @@ def format_signal_message(price_data, analysis, user_id):
         f"│ Sabab: _{analysis['reason']}_\n"
         f"└─────────────────────\n\n"
         f"📊 *Indikatorlar:*\n"
-        f"  • EMA 9:  `{analysis['ema9']}`\n"
-        f"  • EMA 21: `{analysis['ema21']}`\n"
-        f"  • RSI:    `{analysis['rsi']}`\n"
-        f"  • Trend:  {trend_arrow} {analysis['trend']}\n\n"
+        f"  • EMA 9:   `{analysis['ema9']}`\n"
+        f"  • EMA 21:  `{analysis['ema21']}`\n"
+        f"  • RSI:     `{analysis['rsi']}`\n"
+        f"  • MACD:    `{analysis.get('macd', 0)}`\n"
+        f"  • Signal:  `{analysis.get('macd_signal', 0)}`\n"
+        f"  • BB yuqori: `{analysis.get('bb_upper', 0)}`\n"
+        f"  • BB pastki: `{analysis.get('bb_lower', 0)}`\n"
+        f"  • Trend:   {trend_arrow} {analysis['trend']}\n\n"
         f"🎯 *Darajalar:*\n"
         f"  • Stop Loss: `{analysis['sl']}`\n"
         f"  • Take P1:   `{analysis['tp1']}`\n"
