@@ -4,7 +4,8 @@ import asyncio
 import aiohttp
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import zoneinfo
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -191,7 +192,7 @@ def analyze_signal(prices, current):
             "high5": round(high5, 2), "low5": round(low5, 2)}
 
 def format_signal_message(price_data, analysis, user_id):
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    now = datetime.now(zoneinfo.ZoneInfo("Asia/Tashkent")).strftime("%d.%m.%Y %H:%M")
     bars = "█" * (analysis["confidence"] // 10) + "░" * (10 - analysis["confidence"] // 10)
     trend_arrow = "📈" if analysis["trend"] == "UP" else "📉"
     left = signals_left(user_id)
